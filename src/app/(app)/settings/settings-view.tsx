@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  Cloud,
   Database,
   Download,
   ExternalLink,
@@ -11,6 +12,7 @@ import {
   Waves,
 } from "lucide-react";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
@@ -24,10 +26,21 @@ import {
   STORAGE_BUDGET_BYTES,
 } from "@/lib/constants";
 import { useAppData } from "@/lib/data/DataContext";
-import { humanFileSize } from "@/lib/utils";
+import { cloudHealth, type CloudHealth } from "@/lib/cloud/client";
+import { humanFileSize, pluralize } from "@/lib/utils";
 
 export function SettingsView() {
-  const { ready, plants, scans, reports, settings, updateSettings, restoreDemoData, clearAllData } = useAppData();
+  const {
+    ready,
+    plants,
+    scans,
+    reports,
+    settings,
+    updateSettings,
+    restoreDemoData,
+    clearAllData,
+    restoreFromCloud,
+  } = useAppData();
   const [displayName, setDisplayName] = useState<string | null>(null);
   const [profileSaved, setProfileSaved] = useState(false);
   const [confirmRestore, setConfirmRestore] = useState(false);
@@ -41,6 +54,32 @@ export function SettingsView() {
       return 0;
     }
   }, [ready, plants, scans, reports, settings]);
+
+  const [cloudStatus, setCloudStatus] = useState<CloudHealth | "checking">("checking");
+  const [restoring, setRestoring] = useState(false);
+  const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    cloudHealth().then((status) => {
+      if (alive) setCloudStatus(status);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const handleRestore = async () => {
+    setRestoring(true);
+    setRestoreMessage(null);
+    const added = await restoreFromCloud();
+    setRestoreMessage(
+      added > 0
+        ? `Restored ${pluralize(added, "record")} from Supabase.`
+        : "Nothing new to restore — this browser already has everything.",
+    );
+    setRestoring(false);
+  };
 
   if (!ready) {
     return (
@@ -217,6 +256,57 @@ export function SettingsView() {
               Clear all data
             </Button>
           </div>
+        </div>
+      </Card>
+
+      {/* Cloud backup */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-start gap-3">
+            <span className="flex size-9 items-center justify-center rounded-xl bg-moss-100 text-moss-700">
+              <Cloud className="size-4.5" aria-hidden="true" />
+            </span>
+            <div>
+              <CardTitle>Cloud backup</CardTitle>
+              <CardDescription>
+                Plants, scans and reports are also stored in a Supabase database, so your history can be
+                restored after clearing local data.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <div className="space-y-4 px-5 pb-6 sm:px-6">
+          <div className="flex flex-wrap items-center gap-3">
+            {cloudStatus === "checking" ? (
+              <Badge tone="neutral">Checking…</Badge>
+            ) : cloudStatus === "ok" ? (
+              <Badge tone="healthy">Connected</Badge>
+            ) : cloudStatus === "off" ? (
+              <Badge tone="neutral">Not configured</Badge>
+            ) : (
+              <Badge tone="attention">Connection issue</Badge>
+            )}
+            <p className="text-xs text-ink-muted">
+              No account needed — records are linked to this browser&apos;s anonymous key.
+            </p>
+          </div>
+          {cloudStatus === "ok" ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="secondary" size="sm" onClick={handleRestore} disabled={restoring}>
+                <Download className="size-3.5" aria-hidden="true" />
+                {restoring ? "Restoring…" : "Restore from cloud"}
+              </Button>
+              {restoreMessage ? (
+                <span className="text-xs font-medium text-moss-700" role="status">
+                  {restoreMessage}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          <p className="text-xs leading-relaxed text-ink-muted">
+            The browser never talks to Supabase directly — a server route in this app holds the key.
+            Row Level Security is enabled and blocks all public access to the database.
+          </p>
         </div>
       </Card>
 

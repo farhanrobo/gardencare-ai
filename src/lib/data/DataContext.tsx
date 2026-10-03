@@ -6,7 +6,9 @@
  * Backed by a module-level external store so that:
  *  - localStorage is read exactly once on the client (never during SSR),
  *  - server and hydration renders agree (both show a deterministic skeleton),
- *  - every mutation persists and notifies all subscribers.
+ *  - every mutation persists and notifies all subscribers,
+ *  - user actions are also backed up to Supabase through /api/cloud
+ *    (fire-and-forget; the app works identically when that layer is absent).
  */
 import {
   createContext,
@@ -19,6 +21,16 @@ import { DEFAULT_CONFIDENCE_THRESHOLD, MAX_STORED_PREVIEWS } from "@/lib/constan
 import { buildSeedData } from "@/lib/data/seed";
 import { repository } from "@/lib/data/repository";
 import { getClassInfo } from "@/lib/inference/classes";
+import {
+  cloudDeletePlant,
+  cloudDeleteReport,
+  cloudDeleteScan,
+  cloudList,
+  cloudUpsertPlant,
+  cloudUpsertReport,
+  cloudUpsertScan,
+  cloudWipe,
+} from "@/lib/cloud/client";
 import type {
   AppData,
   AppSettings,
@@ -105,6 +117,14 @@ function initStore() {
     }
   }
   snapshot = { ready: true, data, storageError: null };
+  if (!existing) {
+    // Fresh browser: try to restore a previous cloud backup for this device
+    // (no-op when the cloud layer is not configured). Deferred out of the
+    // render path that may have triggered this init.
+    window.setTimeout(() => {
+      void restoreFromCloud();
+    }, 0);
+  }
 }
 
 function subscribe(listener: () => void): () => void {
@@ -137,6 +157,45 @@ function mutate(updater: (prev: AppData) => AppData) {
   emit();
 }
 
+/* ----------------------------- cloud backup ----------------------------- */
+
+function mergeById<T extends { id: string }>(local: T[], remote: T[]): T[] {
+  const ids = new Set(local.map((row) => row.id));
+  return [...local, ...remote.filter((row) => !ids.has(row.id))];
+}
+
+/**
+ * Pulls cloud rows for this browser and merges in anything missing locally.
+ * Returns the number of records added (0 when nothing changed or cloud is off).
+ */
+async function restoreFromCloud(): Promise<number> {
+  const remote = await cloudList();
+  const current = snapshot.data;
+  if (!remote || !current) return 0;
+
+  const plants = mergeById(current.plants, remote.plants);
+  const scans = mergeById(current.scans, remote.scans).sort((a, b) =>
+    a.createdAt < b.createdAt ? 1 : -1,
+  );
+  const reports = mergeById(current.reports, remote.reports);
+  const added =
+    plants.length -
+    current.plants.length +
+    (scans.length - current.scans.length) +
+    (reports.length - current.reports.length);
+  if (added <= 0) return 0;
+
+  const merged: AppData = { ...current, plants, scans, reports };
+  try {
+    repository.save(merged);
+  } catch {
+    // Local storage full — keep the merged view in memory anyway.
+  }
+  snapshot = { ready: true, data: merged, storageError: snapshot.storageError };
+  emit();
+  return added;
+}
+
 /* ------------------------------- actions ------------------------------- */
 
 function addPlant(input: NewPlantInput): Plant {
@@ -149,23 +208,38 @@ function addPlant(input: NewPlantInput): Plant {
     createdAt: new Date().toISOString(),
   };
   mutate((prev) => ({ ...prev, plants: [plant, ...prev.plants] }));
+  void cloudUpsertPlant(plant);
   return plant;
 }
 
 function updatePlant(id: string, patch: Partial<NewPlantInput>) {
+  let updated: Plant | undefined;
   mutate((prev) => ({
     ...prev,
-    plants: prev.plants.map((plant) => (plant.id === id ? { ...plant, ...patch } : plant)),
+    plants: prev.plants.map((plant) => {
+      if (plant.id !== id) return plant;
+      updated = { ...plant, ...patch };
+      return updated;
+    }),
   }));
+  if (updated) void cloudUpsertPlant(updated);
 }
 
 function deletePlant(id: string) {
+  const unlinked: Scan[] = [];
   mutate((prev) => ({
     ...prev,
     plants: prev.plants.filter((plant) => plant.id !== id),
     // Keep scan history, but unlink it from the removed plant.
-    scans: prev.scans.map((scan) => (scan.plantId === id ? { ...scan, plantId: null } : scan)),
+    scans: prev.scans.map((scan) => {
+      if (scan.plantId !== id) return scan;
+      const next = { ...scan, plantId: null };
+      unlinked.push(next);
+      return next;
+    }),
   }));
+  void cloudDeletePlant(id);
+  for (const scan of unlinked) void cloudUpsertScan(scan);
 }
 
 function addScan(input: NewScanInput): Scan {
@@ -193,18 +267,26 @@ function addScan(input: NewScanInput): Scan {
     }
     return next;
   });
+  void cloudUpsertScan(scan);
   return scan;
 }
 
 function deleteScan(id: string) {
   mutate((prev) => ({ ...prev, scans: prev.scans.filter((scan) => scan.id !== id) }));
+  void cloudDeleteScan(id);
 }
 
 function linkScan(scanId: string, plantId: string | null) {
+  let updated: Scan | undefined;
   mutate((prev) => ({
     ...prev,
-    scans: prev.scans.map((scan) => (scan.id === scanId ? { ...scan, plantId } : scan)),
+    scans: prev.scans.map((scan) => {
+      if (scan.id !== scanId) return scan;
+      updated = { ...scan, plantId };
+      return updated;
+    }),
   }));
+  if (updated) void cloudUpsertScan(updated);
 }
 
 function addReport(input: NewReportInput): ProblemReport {
@@ -218,18 +300,26 @@ function addReport(input: NewReportInput): ProblemReport {
     createdAt: new Date().toISOString(),
   };
   mutate((prev) => ({ ...prev, reports: [report, ...prev.reports] }));
+  void cloudUpsertReport(report);
   return report;
 }
 
 function updateReportStatus(id: string, status: ReportStatus) {
+  let updated: ProblemReport | undefined;
   mutate((prev) => ({
     ...prev,
-    reports: prev.reports.map((report) => (report.id === id ? { ...report, status } : report)),
+    reports: prev.reports.map((report) => {
+      if (report.id !== id) return report;
+      updated = { ...report, status };
+      return updated;
+    }),
   }));
+  if (updated) void cloudUpsertReport(updated);
 }
 
 function deleteReport(id: string) {
   mutate((prev) => ({ ...prev, reports: prev.reports.filter((report) => report.id !== id) }));
+  void cloudDeleteReport(id);
 }
 
 function updateSettings(patch: Partial<AppSettings>) {
@@ -246,6 +336,7 @@ function restoreDemoData() {
   }
   snapshot = { ready: true, data: seeded, storageError };
   emit();
+  void cloudWipe();
 }
 
 function clearAllData() {
@@ -260,6 +351,7 @@ function clearAllData() {
   repository.clear();
   snapshot = { ready: true, data: empty, storageError: null };
   emit();
+  void cloudWipe();
 }
 
 /* ------------------------------- context ------------------------------- */
@@ -283,6 +375,8 @@ interface AppContextValue {
   updateSettings: (patch: Partial<AppSettings>) => void;
   restoreDemoData: () => void;
   clearAllData: () => void;
+  /** Merge any cloud rows for this browser back into local data. Returns added count. */
+  restoreFromCloud: () => Promise<number>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -310,6 +404,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       updateSettings,
       restoreDemoData,
       clearAllData,
+      restoreFromCloud,
     }),
     [state],
   );

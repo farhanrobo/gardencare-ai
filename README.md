@@ -23,6 +23,8 @@ GardenCare AI is a working software prototype that identifies possible plant hea
 - [AI model and dataset](#ai-model-and-dataset)
 - [Licenses](#licenses)
 - [How the AI inference works](#how-the-ai-inference-works)
+- [Cloud backup (Supabase)](#cloud-backup-supabase)
+- [What it can and can't identify](#what-it-can-and-cant-identify)
 - [Model setup / download](#model-setup--download)
 - [Run locally](#run-locally)
 - [Build](#build)
@@ -57,6 +59,7 @@ This is the **software-only** part of the solution. It deliberately contains **n
 | --- | --- |
 | **Plant health scanner** | Drag & drop / camera upload, preview, "Analyze Plant", real in-browser inference, result card with condition, confidence, explanation and next steps |
 | **Honest results** | "Possible condition" / "Model prediction" / "Estimated confidence" wording, a persistent disclaimer, and a clear low-confidence state ("Unable to confidently identify the condition… try a clearer image") governed by a user-adjustable threshold |
+| **Cloud backup** | Plants, scans and reports are also saved to a Supabase database from the app's own server route — history can be restored after clearing local data. RLS is enabled and no key ever reaches the browser |
 | **Dashboard** | Greeting, plants tracked / scans / healthy / needs-attention stats, recent scans, scan-health donut, "Plants needing attention" cards |
 | **My Plants** | Plant records (name, species, location, notes, date added), search, status from the latest linked scan, scan/history shortcuts |
 | **Scan history** | Every scan with thumbnail, prediction, confidence, date and status; filters (healthy / needs attention / low confidence / by plant) kept in the URL; full scan detail page with re-scan and delete |
@@ -72,7 +75,8 @@ This is the **software-only** part of the solution. It deliberately contains **n
 - **Tailwind CSS v4** — custom botanical theme (moss palette, soft shadows, rounded cards)
 - **lucide-react** — icons
 - **onnxruntime-web** (WebAssembly) — on-device inference
-- **localStorage** behind a small repository interface (`DataRepository`) — swappable for a real database later
+- **localStorage** behind a small repository interface (`DataRepository`) — the local-first source of truth
+- **Supabase (Postgres)** — optional cloud backup for user records, accessed only through a server route (see below)
 - No chart library, no UI framework — a hand-built design system for a small dependency surface
 
 ## AI model and dataset
@@ -107,6 +111,29 @@ Everything runs client-side — the leaf photo **never leaves the browser**.
 3. **Infer**: a single `session.run()` call executes MobileNetV2 (typically tens of milliseconds), and softmax produces class probabilities. The top-3 are returned with timing.
 4. **Interpret** (`src/lib/inference/classes.ts`): the 38 class ids map to structured metadata — plant, condition, healthy/unhealthy, a short explanation and hand-written care guidance.
 5. **Honesty layer**: the result is labelled "Model prediction" / "Possible condition" / "Estimated confidence"; results below the user's threshold (default 60%) switch to a low-confidence state instead of a confident claim; the disclaimer is always shown.
+
+## Cloud backup (Supabase)
+
+History is local-first, but every user action is also backed up to a **Supabase Postgres** database, so records survive clearing browser data on the same browser.
+
+**The browser never talks to Supabase.** All access goes through one small server route (`src/app/api/cloud/route.ts`) that holds the server-only secret key:
+
+- Env vars (server-only, **no** `NEXT_PUBLIC_` prefix): `SUPABASE_URL`, `SUPABASE_SECRET_KEY` — see `.env.example`. They are never bundled into the frontend.
+- Tables: `plants`, `scans`, `problem_reports` (see `supabase/schema.sql`). Every row carries an anonymous `device_id`.
+- **RLS is enabled on all tables with no public policies** and the `anon` / `authenticated` roles are explicitly revoked: the publishable/anon keys can read or write **nothing** (verified — the REST API returns `401`). Only the server route (secret key) can touch the data.
+- Writes are fire-and-forget: if Supabase is unreachable or not configured, the app simply behaves as before (local-only). Nothing breaks.
+- **Restore**: when the app opens in a browser with no local data — or via *Settings → Restore from cloud* — any rows stored for that browser's anonymous key are merged back in.
+- Demo data is never uploaded; only records you actually create are backed up.
+
+Honest limits: without sign-in, the "account" is an anonymous random key kept in a 1-year cookie. Restoring works on the same browser; cross-device sync arrives with real accounts later. If a full site-data wipe removes both storage and the cookie, a new anonymous key is issued and older cloud rows can no longer be reached.
+
+## What it can and can't identify
+
+**It is a crop-disease detector, not a plant identifier.** The model has exactly 38 classes across 14 crops (apple, blueberry, cherry, corn, grape, orange, peach, bell pepper, potato, raspberry, soybean, squash, strawberry, tomato).
+
+- For those crops it reports the plant + the condition (or "Healthy") with an honest confidence score, an explanation and next steps.
+- For anything else — garden weeds (parthenium, nutgrass…), rice, chilli, okra, brinjal, basil, roses or unknown plants — it **cannot tell you what the plant is**. It will still pick one of its 38 known answers: often with low confidence (the app then shows the low-confidence warning), but sometimes confidently wrong.
+- Practical rule: trust high-confidence results only for the supported crops; treat everything else as out of scope. An "unknown / out of scope" check and India-specific datasets are listed under [Future improvements](#future-improvements).
 
 ## Model setup / download
 
@@ -143,6 +170,8 @@ npm run dev
 
 Open <http://localhost:3000>. The first analysis downloads the ~9 MB model (with a progress bar); afterwards it loads from cache. Everything works offline after that first load.
 
+Cloud backup is optional in development: copy `.env.example` to `.env.local` and fill in your Supabase values (server-only keys — see [Cloud backup](#cloud-backup-supabase)). Without them the app runs local-only and nothing breaks.
+
 ## Build
 
 ```bash
@@ -157,7 +186,8 @@ The app is a pure client-side inference app — **no server functions, no enviro
 
 1. Push the repository to GitHub.
 2. Import it at <https://vercel.com/new> (framework auto-detected: Next.js).
-3. Deploy. The bundled model under `public/` is served with immutable cache headers (see `next.config.ts`).
+3. Add environment variables (Project → Settings → Environment Variables): `SUPABASE_URL` and `SUPABASE_SECRET_KEY` for Production and Preview. No `NEXT_PUBLIC_` variables are needed — nothing about Supabase ships to the browser.
+4. Deploy. The bundled model under `public/` is served with immutable cache headers (see `next.config.ts`).
 
 Because inference is client-side, there is nothing to configure in production — if the static assets load, the scanner works.
 
@@ -169,6 +199,9 @@ scripts/                     # setup + validation tooling
   download-samples.mjs       # fetch real PlantVillage sample photos
   copy-ort-assets.mjs        # copy the ORT wasm runtime into public/ort
   validate_model.py          # Python reference check of the model + samples
+supabase/
+  schema.sql                 # tables + RLS policy setup (run once per project)
+.env.example                 # environment variable names for the cloud backup (no values)
 public/
   models/plant-disease/      # config.json, preprocessor_config.json, onnx/model.onnx
   ort/                       # onnxruntime-web wasm runtime (same-origin)
@@ -176,6 +209,7 @@ public/
 src/
   app/                       # routes: / (landing), /dashboard, /scanner, /plants,
                              # /history, /history/[id], /reports, /tips, /settings
+    api/cloud/               # server route — the only place that talks to Supabase
   components/
     ui/                      # Button, Card, Badge, Field, Modal, EmptyState, …
     layout/                  # AppShell (sidebar + mobile drawer), PageHeader
@@ -187,6 +221,7 @@ src/
   lib/
     inference/               # preprocess, classifier (ORT), classes (38-class metadata)
     data/                    # types-backed repository, DataContext (store), seed data
+    cloud/                   # Supabase backup client + row mappers (browser side)
     content/                 # hand-written care tips
     constants.ts, utils.ts
 ```
@@ -195,13 +230,15 @@ src/
 
 - **Python reference check** — `python scripts/validate_model.py` verifies the model and the exact preprocessing against 6 real photos (all 6 correct).
 - **Browser end-to-end** — the app was exercised with Playwright (automated MCP session) covering: landing load, navigation, upload (file chooser + bundled samples), invalid-file handling, model download, analysis, result card + confidence, saving scans (with plant linking), dashboard updates, plant creation, scan history + filters + detail, problem reports (submit, status flow, delete), demo-data restore, mobile layout (390 px, including the nav drawer) at every route, console cleanliness, 404 handling and overflow checks.
+- **Cloud layer** — verified end-to-end against the real database: scan save, plant create, scan delete and wipe are all reflected in Postgres; clearing local data and reloading restored the backed-up scan; the publishable/anon key is rejected (`401`) while the server route works.
 
 ## Limitations
 
 - **Not a diagnosis.** The model identifies visual patterns; it cannot see pests on the underside, root problems, nutrient issues or environmental stress. Always confirm with local expertise when a problem persists.
 - **Dataset bias.** PlantVillage photos are largely **single leaves photographed on controlled, uniform backgrounds**. The model can be less accurate on busy real-world photos (multiple leaves, soil, hands, shadows). This is a known weakness of PlantVillage-trained models and is exactly why the app reports a confidence score and a low-confidence state.
 - **Coverage.** The 38 classes cover 14 crop species; ornamental garden plants (roses, basil, etc.) are outside the model's scope — the app says so instead of guessing.
-- **Storage.** Records live in `localStorage` (~5 MB): the app downscales photos and, near the limit, progressively retires the oldest full-size previews to their thumbnails. Export JSON exists for backup.
+- **Storage.** Records live in `localStorage` (~5 MB) as the local-first source of truth: the app downscales photos and, near the limit, progressively retires the oldest full-size previews to their thumbnails. Export JSON exists for backup, and user records are also mirrored to Supabase.
+- **Cloud backup is device-bound.** Without sign-in, records are linked to an anonymous key in this browser's cookie; restoring works on the same browser. A full site-data wipe (including cookies) issues a new key — cross-device sync comes with accounts later.
 - **Demo data.** Seeded records are illustrative and clearly marked (`isDemo`), including the generated leaf illustrations used for their thumbnails.
 
 ## Future improvements
