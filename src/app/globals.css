@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Surfaces */
+  --color-canvas: #f5f8f4;
+  --color-surface: #ffffff;
+  --color-line: #e3eae2;
+  --color-line-strong: #cddacb;
+
+  /* Ink */
+  --color-ink: #12241a;
+  --color-ink-soft: #3f5347;
+  --color-ink-muted: #667a6e;
+  --color-ink-faint: #8b9b90;
+
+  /* Brand — moss green */
+  --color-moss-50: #f2f7f2;
+  --color-moss-100: #e1efe3;
+  --color-moss-200: #c3dfc9;
+  --color-moss-300: #98c7a3;
+  --color-moss-400: #64a877;
+  --color-moss-500: #418b55;
+  --color-moss-600: #2f7042;
+  --color-moss-700: #285b37;
+  --color-moss-800: #22492e;
+  --color-moss-900: #1d3d27;
+
+  --shadow-soft: 0 1px 2px rgb(18 36 26 / 0.04), 0 10px 30px -18px rgb(18 36 26 / 0.25);
+  --shadow-lift: 0 2px 4px rgb(18 36 26 / 0.05), 0 20px 45px -22px rgb(18 36 26 / 0.32);
+
+  --animate-fade-up: fade-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-scan-sweep: scan-sweep 3.4s ease-in-out infinite;
+  --animate-scan-sweep-lg: scan-sweep-lg 4.2s ease-in-out infinite;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes scan-sweep {
+  0% {
+    transform: translateY(-44px);
+    opacity: 0;
+  }
+  10% {
+    opacity: 0.9;
+  }
+  45% {
+    transform: translateY(44px);
+    opacity: 0.9;
+  }
+  55%,
+  100% {
+    transform: translateY(44px);
+    opacity: 0;
+  }
+}
+
+@keyframes scan-sweep-lg {
+  0% {
+    transform: translateY(-124px);
+    opacity: 0;
+  }
+  10% {
+    opacity: 0.85;
+  }
+  45% {
+    transform: translateY(124px);
+    opacity: 0.85;
+  }
+  55%,
+  100% {
+    transform: translateY(124px);
+    opacity: 0;
+  }
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+  }
+
+  ::selection {
+    background: var(--color-moss-200);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-moss-600);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
